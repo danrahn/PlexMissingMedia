@@ -22,8 +22,8 @@ If the arguments are not found in the command line, it will look in config.yml. 
 
 Value | Command line | config.yaml | Default | Description
 ---|---|---|---|---
-use_db | `--use_database` | `use_database` | Whether to read from the database directly instead of making web API calls. This will be faster, but it's recommended to shut down PMS before you do any external access on your database.
-db_path | `d`, `--db_path` | `db_path` | The full path to the Plex database. Only needed if `use_db` is True
+use_db | `--use_database` | `use_database` | `False` | Whether to read from the database directly instead of making web API calls. This will be faster, but it's recommended to shut down PMS before you do any external access on your database.
+db_path | `d`, `--db_path` | `db_path` | None | The full path to the Plex database. Only needed if `use_db` is True
 host | `--host` | `host` | `http://localhost:32400` | The host of the Plex server. Only needed if `use_db` if False.
 token | `-t`, `--token` | `token` | None | Your Plex token (see [finding an authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)). Only needed if `use_db` is False.
 section | `-s`, `--section` | `section` | None | The id of the library section to parse. If none is provided, the script will print available values.
