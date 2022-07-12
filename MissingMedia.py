@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import requests
+import sqlite3
 import sys
 from urllib import parse
 import yaml
@@ -27,17 +28,27 @@ class PlexMissingMedia:
             config = {}
 
         parser = argparse.ArgumentParser()
+        parser.add_argument('--use_database', help='Read from the Plex database directly instead of web API calls')
+        parser.add_argument('-d', '--db_path', help='Full path to the Plex database')
         parser.add_argument('--host', help='Your Plex host. Defaults to http://localhost:32400')
         parser.add_argument('-t', '--token', help='Your Plex authentication token')
         parser.add_argument('-s', '--section', help='The id of the library to parse')
-        parser.add_argument('-e', '--find_extras', action='store_true', help='Match extras in addition to regular library items. WARNING: Takes significantly more time to parse.')
+        parser.add_argument('-e', '--find_extras', help='Match extras in addition to regular library items. WARNING: Takes significantly more time to parse.')
         self.cmd_args = parser.parse_args()
-        self.token = self.get_config_value(config, 'token', prompt='Enter your Plex token')
-        self.host = self.get_config_value(config, 'host', 'http://localhost:32400')
+        self.use_db = self.get_config_value(config, 'use_database', default=False)
+        if self.use_db:
+            self.db_path = self.get_config_value(config, 'db_path', prompt='Enter the full path to your Plex database')
+            self.token = None
+            self.host = None
+        else:
+            self.token = self.get_config_value(config, 'token', prompt='Enter your Plex token')
+            self.host = self.get_config_value(config, 'host', 'http://localhost:32400')
+            self.db_path = None
+
         self.section_id = self.get_config_value(config, 'section', default=None)
         if type(self.section_id) != int and self.section_id.isnumeric():
             self.section_id = int(self.section_id)
-        self.find_extras = self.get_config_value(config, 'find_extras', False, prompt='Find extras (Note: This is _significantly_ slower)')
+        self.find_extras = self.get_config_value(config, 'find_extras', self.use_db, prompt='Find extras (Note: This is _significantly_ slower)')
         self.valid = True
 
 
@@ -74,7 +85,7 @@ class PlexMissingMedia:
             return
 
         print()
-        if not self.test_plex_connection():
+        if not self.use_db and not self.test_plex_connection():
             return
 
         section = self.get_section()
@@ -103,6 +114,42 @@ class PlexMissingMedia:
 
         print(f'Found {len(on_disk)} files for library section {section["key"]}\'s root path(s).')
 
+        in_library = None
+        if self.use_db:
+            in_library = self.get_plex_data_db(paths)
+        else:
+            in_library = self.get_plex_data_web_api(section)
+
+        print(f'Found {len(in_library)} items in library')
+
+        intersection = on_disk - in_library
+
+        print(f'Found {len(intersection)} items not in Plex library:')
+        for missing in sorted(intersection):
+            print(f'\t{missing}')
+
+        intersection = in_library - on_disk
+        if (len(intersection) > 0):
+            print(f'Found {len(intersection)} items in library but not on disk:')
+            for missing in sorted(intersection):
+                print(f'\t{missing}')
+
+
+    def get_plex_data_db(self, paths):
+        in_library = set()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            for location in paths:
+                plex_path = location['path']
+                plex_path = plex_path if plex_path.endswith(os.path.sep) else plex_path + os.path.sep
+                cur.execute('SELECT file FROM media_parts WHERE file LIKE ?', (plex_path + '%',))
+                for row in cur.fetchall():
+                    in_library.add(row['file'].lower())
+        return in_library
+
+
+    def get_plex_data_web_api(self, section):
         # 1 == movies, 4 == episodes, 10 == track
         media_type = 1
         if section['type'] == 'artist':
@@ -114,8 +161,8 @@ class PlexMissingMedia:
         
         if 'Metadata' not in plex_items:
             print('Unable to parse library items, oops.')
-            return
-        
+            return set()
+
         in_library = set()
         extras_count = 0
         print(f'Reading {len(plex_items["Metadata"])} library items')
@@ -138,20 +185,7 @@ class PlexMissingMedia:
                         for extra_media in extra['Media']:
                             for extra_part in extra_media['Part']:
                                 in_library.add(extra_part['file'].lower())
-
-        print(f'Found {len(in_library)} items in library')
-
-        intersection = on_disk - in_library
-
-        print(f'Found {len(intersection)} items not in Plex library:')
-        for missing in sorted(intersection):
-            print(f'\t{missing}')
-
-        intersection = in_library - on_disk
-        if (len(intersection) > 0):
-            print(f'Found {len(intersection)} items in library but not on disk:')
-            for missing in sorted(intersection):
-                print(f'\t{missing}')
+        return in_library
 
 
     def test_plex_connection(self):
@@ -182,12 +216,14 @@ class PlexMissingMedia:
 
     def get_section(self):
         """Returns the section object that the collection will be added to"""
-        sections = self.get_json_response('/library/sections')
-        if not sections or 'Directory' not in sections:
+        if self.use_db:
+            sections = self.get_sections_db()
+        else:
+            sections = self.get_sections_web()
+        if sections == None:
             return None
 
         valid_types = { 'movie', 'artist', 'show' }
-        sections = sections['Directory']
         find = self.section_id
         if type(find) == int:
             for section in sections:
@@ -220,6 +256,41 @@ class PlexMissingMedia:
         print(f'\nSelected "{choices[int(choice)]["title"]}"\n')
         return choices[int(choice)]
 
+
+    def get_sections_web(self):
+        sections = self.get_json_response('/library/sections')
+        if not sections or 'Directory' not in sections:
+            return None
+
+        return sections['Directory']
+
+
+    def get_sections_db(self):
+        sections = {}
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT s.id AS key, s.name AS title, s.section_type AS type, sl.root_path AS path FROM library_sections s INNER JOIN section_locations sl ON s.id=sl.library_section_id")
+            for row in cur.fetchall():
+                if not row['key'] in sections:
+                    sections[row['key']] = {
+                        'key' : row['key'],
+                        'title' : row['title'],
+                        'type' : self.media_type_str(row['type']),
+                        'Location' : [] }
+                sections[row['key']]['Location'].append({ 'path' : row['path'] })
+        return list(sections.values())
+
+
+    def media_type_str(self, media_type):
+        if media_type == 1:
+            return 'movie'
+        elif media_type == 2:
+            return 'show'
+        elif media_type == 8:
+            return 'artist'
+        else:
+            return ''
 
     def get_json_response(self, url, params={}):
         """Returns the JSON response from the given URL"""
