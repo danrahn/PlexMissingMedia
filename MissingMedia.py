@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import platform
 import requests
 import sqlite3
 import sys
@@ -37,7 +38,11 @@ class PlexMissingMedia:
         self.cmd_args = parser.parse_args()
         self.use_db = self.get_config_value(config, 'use_database', default=False)
         if self.use_db:
-            self.db_path = self.get_config_value(config, 'db_path', prompt='Enter the full path to your Plex database')
+            self.db_path = self.get_config_value(config, 'db_path', default='-1')
+            if self.db_path == '-1' or not os.path.isfile(self.db_path):
+                self.db_path = self.get_db_path()
+                if self.db_path == False:
+                    return
             self.token = None
             self.host = None
         else:
@@ -50,6 +55,29 @@ class PlexMissingMedia:
             self.section_id = int(self.section_id)
         self.find_extras = self.get_config_value(config, 'find_extras', self.use_db, prompt='Find extras (Note: This is _significantly_ slower)')
         self.valid = True
+
+
+    def get_db_path(self):
+        """Attempt to retrieve the database path from its default location on Windows/Mac/Linux"""
+        expected = ''
+        system = platform.system().lower()
+        if system == 'windows' and 'LOCALAPPDATA' in os.environ:
+            expected = os.environ['LOCALAPPDATA']
+        elif system == 'darwin':
+            expected = os.path.join(os.environ['HOME'], 'Library', 'Application Support')
+        elif system == 'linux' and 'PLEX_HOME' in os.environ:
+            expected = os.path.join(os.environ['PLEX_HOME'], 'Library', 'Application Support')
+        expected = os.path.join(expected, 'Plex Media Server', 'Plug-in Support', 'Databases', 'com.plexapp.plugins.library.db')
+        auto = True
+        while not os.path.isfile(expected):
+            if (expected == '-1'):
+                return False
+            if auto:
+                auto = False
+                expected = input(f'Could not automatically find the Plex database. Please enter the full path: ')
+            else:
+                expected = input(f'Could not find database file {expected}. Please enter the full path: ')
+        return expected
 
 
     def get_config_value(self, config, key, default='', prompt=''):
@@ -82,6 +110,7 @@ class PlexMissingMedia:
         """Kick off the processing"""
 
         if not self.valid:
+            print('Unable to initialize settings, exiting...')
             return
 
         print()
@@ -124,15 +153,14 @@ class PlexMissingMedia:
 
         intersection = on_disk - in_library
 
-        print(f'Found {len(intersection)} items not in Plex library:')
+        print(f'Found {len(intersection)} items on disk but not in Plex library:')
         for missing in sorted(intersection):
             print(f'\t{missing}')
 
         intersection = in_library - on_disk
-        if (len(intersection) > 0):
-            print(f'Found {len(intersection)} items in library but not on disk:')
-            for missing in sorted(intersection):
-                print(f'\t{missing}')
+        print(f'Found {len(intersection)} items in library but not on disk:')
+        for missing in sorted(intersection):
+            print(f'\t{missing}')
 
 
     def get_plex_data_db(self, paths):
@@ -142,6 +170,8 @@ class PlexMissingMedia:
             cur = conn.cursor()
             for location in paths:
                 plex_path = location['path']
+                # Ensure path has dir separator at the end to prevent overmatching against directories
+                # that are substrings of another ("C:\Movies" shouldn't match "C:\Movies2\SomeMovie.mkv")
                 plex_path = plex_path if plex_path.endswith(os.path.sep) else plex_path + os.path.sep
                 cur.execute('SELECT file FROM media_parts WHERE file LIKE ?', (plex_path + '%',))
                 for row in cur.fetchall():
